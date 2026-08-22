@@ -1,0 +1,61 @@
+name: Build PC Boost for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Locate PC Boost project
+        shell: pwsh
+        run: |
+          $project = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter PCBoostOptimizer.csproj -Recurse | Select-Object -First 1
+          if ($null -eq $project) {
+            $archives = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter *.zip -File
+            foreach ($archive in $archives) {
+              $destination = Join-Path $env:RUNNER_TEMP ("pcboost_" + [Guid]::NewGuid().ToString("N"))
+              Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination -Force
+              $project = Get-ChildItem -Path $destination -Filter PCBoostOptimizer.csproj -Recurse | Select-Object -First 1
+              if ($null -ne $project) {
+                break
+              }
+            }
+          }
+          if ($null -eq $project) {
+            throw "PCBoostOptimizer.csproj was not found. Add the extracted project folder or a ZIP archive containing it."
+          }
+          "PCBOOST_PROJECT=$($project.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PCBOOST_PUBLISH=$($project.Directory.FullName)\publish" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish standalone EXE
+        shell: pwsh
+        run: >-
+          dotnet publish $env:PCBOOST_PROJECT
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -o $env:PCBOOST_PUBLISH
+
+      - name: Upload PC Boost EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCBoostOptimizer-win-x64
+          path: '**/publish/PCBoostOptimizer.exe'
+          if-no-files-found: error
