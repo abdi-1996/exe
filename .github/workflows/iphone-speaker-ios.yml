@@ -1,0 +1,54 @@
+name: Build iPhone Speaker IPA
+
+on:
+  push:
+    branches:
+      - iphone-speaker-build
+    paths:
+      - iphone-speaker-source.b64
+      - .github/workflows/iphone-speaker-ios.yml
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode source bundle
+        run: |
+          python3 - <<'PY'
+          import base64, pathlib
+          data = pathlib.Path("iphone-speaker-source.b64").read_text().strip()
+          pathlib.Path("source.zip").write_bytes(base64.b64decode(data))
+          PY
+          mkdir -p src
+          unzip -q source.zip -d src
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: src/ios
+        run: xcodegen generate
+
+      - name: Build unsigned iPhone app
+        working-directory: src/ios
+        run: |
+          xcodebuild             -project iPhoneSpeaker.xcodeproj             -scheme iPhoneSpeaker             -configuration Release             -sdk iphoneos             -destination 'generic/platform=iOS'             -derivedDataPath build             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=''             build
+
+      - name: Package IPA
+        working-directory: src/ios
+        run: |
+          test -d build/Build/Products/Release-iphoneos/iPhoneSpeaker.app
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/iPhoneSpeaker.app Payload/
+          zip -qry iPhoneSpeaker-unsigned.ipa Payload
+          test -f iPhoneSpeaker-unsigned.ipa
+          ls -lh iPhoneSpeaker-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iPhoneSpeaker-iOS-unsigned
+          path: src/ios/iPhoneSpeaker-unsigned.ipa
+          if-no-files-found: error
