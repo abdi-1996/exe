@@ -23,11 +23,12 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '9.0.x'
 
       - name: Publish self-contained single EXE
         shell: pwsh
         run: |
+          (Get-Content src/windows/iPhoneSpeakerPC/iPhoneSpeakerPC.csproj -Raw).Replace('net8.0-windows','net9.0-windows') | Set-Content src/windows/iPhoneSpeakerPC/iPhoneSpeakerPC.csproj
           dotnet restore src/windows/iPhoneSpeakerPC/iPhoneSpeakerPC.csproj
           dotnet publish src/windows/iPhoneSpeakerPC/iPhoneSpeakerPC.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
