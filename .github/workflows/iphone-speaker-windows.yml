@@ -1,0 +1,44 @@
+name: Build iPhone Speaker Windows EXE
+
+on:
+  push:
+    branches:
+      - iphone-speaker-build
+    paths:
+      - iphone-speaker-source.b64
+      - .github/workflows/iphone-speaker-windows.yml
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode source bundle
+        shell: pwsh
+        run: |
+          $b64 = Get-Content iphone-speaker-source.b64 -Raw
+          [IO.File]::WriteAllBytes("source.zip", [Convert]::FromBase64String($b64.Trim()))
+          Expand-Archive source.zip -DestinationPath src -Force
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish self-contained single EXE
+        shell: pwsh
+        run: |
+          dotnet restore src/windows/iPhoneSpeakerPC/iPhoneSpeakerPC.csproj
+          dotnet publish src/windows/iPhoneSpeakerPC/iPhoneSpeakerPC.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+
+      - name: Verify EXE
+        shell: pwsh
+        run: |
+          if (!(Test-Path publish/iPhoneSpeakerPC.exe)) { throw "EXE not produced" }
+          Get-Item publish/iPhoneSpeakerPC.exe | Format-List Name,Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iPhoneSpeakerPC-Windows-x64
+          path: publish/iPhoneSpeakerPC.exe
+          if-no-files-found: error
