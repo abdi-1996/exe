@@ -23,11 +23,40 @@ public sealed class App : Application
     [STAThread]
     public static void Main()
     {
-        var app = new App
+        try
         {
-            ShutdownMode = ShutdownMode.OnMainWindowClose
-        };
-        app.Run(new MainWindow());
+            var app = new App
+            {
+                ShutdownMode = ShutdownMode.OnMainWindowClose
+            };
+            app.DispatcherUnhandledException += (_, e) =>
+            {
+                WriteCrashLog(e.Exception);
+                MessageBox.Show("Ошибка приложения:\n\n" + e.Exception.Message + "\n\nЛог сохранён в %LOCALAPPDATA%\\QuickVideoCutter\\crash.log",
+                    "Quick Video Cutter", MessageBoxButton.OK, MessageBoxImage.Error);
+                e.Handled = true;
+            };
+            app.Run(new MainWindow());
+        }
+        catch (Exception ex)
+        {
+            WriteCrashLog(ex);
+            MessageBox.Show("Не удалось запустить Quick Video Cutter:\n\n" + ex.Message + "\n\nЛог сохранён в %LOCALAPPDATA%\\QuickVideoCutter\\crash.log",
+                "Quick Video Cutter", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    static void WriteCrashLog(Exception ex)
+    {
+        try
+        {
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuickVideoCutter");
+            Directory.CreateDirectory(dir);
+            File.AppendAllText(Path.Combine(dir, "crash.log"),
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine +
+                ex + Environment.NewLine + new string('-', 80) + Environment.NewLine);
+        }
+        catch { }
     }
 }
 
@@ -40,9 +69,9 @@ public sealed class MainWindow : Window
     readonly TextBlock statusText = new();
     readonly TextBlock currentTimeText = new();
     readonly TextBlock rangeText = new();
-    readonly Button playButton;
-    readonly Button exportButton;
-    readonly Button cancelButton;
+    Button playButton = null!;
+    Button exportButton = null!;
+    Button cancelButton = null!;
     readonly ComboBox modeBox = new();
     readonly DispatcherTimer timer;
     string? inputPath;
@@ -96,10 +125,6 @@ public sealed class MainWindow : Window
         var footer = BuildFooter();
         Grid.SetRow(footer, 3);
         root.Children.Add(footer);
-
-        playButton = (Button)((FrameworkElement)previewCard).FindName("PlayButton")!;
-        exportButton = (Button)((FrameworkElement)footer).FindName("ExportButton")!;
-        cancelButton = (Button)((FrameworkElement)footer).FindName("CancelButton")!;
 
         timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
         timer.Tick += (_, _) =>
@@ -261,7 +286,7 @@ public sealed class MainWindow : Window
         controls.Children.Add(back);
 
         var play = MakeIconButton("▶");
-        play.Name = "PlayButton";
+        playButton = play;
         play.Margin = new Thickness(8, 0, 8, 0);
         play.Click += (_, _) => TogglePlayback();
         Grid.SetColumn(play, 1);
@@ -292,8 +317,6 @@ public sealed class MainWindow : Window
         outer.Children.Add(controls);
 
         border.Child = outer;
-        border.RegisterName("PlayButton", play);
-        border.RegisterName("Placeholder", placeholder);
         return border;
     }
 
@@ -378,7 +401,7 @@ public sealed class MainWindow : Window
         grid.Children.Add(left);
 
         var cancel = MakeButton("Отмена", Panel2, Text, 110);
-        cancel.Name = "CancelButton";
+        cancelButton = cancel;
         cancel.IsEnabled = false;
         cancel.Margin = new Thickness(12, 0, 0, 0);
         cancel.Click += (_, _) => CancelExport();
@@ -386,15 +409,13 @@ public sealed class MainWindow : Window
         grid.Children.Add(cancel);
 
         var export = MakeButton("Экспортировать", Accent, Text, 160);
-        export.Name = "ExportButton";
+        exportButton = export;
         export.Margin = new Thickness(12, 0, 0, 0);
         export.Click += async (_, _) => await ExportAsync();
         Grid.SetColumn(export, 2);
         grid.Children.Add(export);
 
         border.Child = grid;
-        border.RegisterName("ExportButton", export);
-        border.RegisterName("CancelButton", cancel);
         return border;
     }
 
