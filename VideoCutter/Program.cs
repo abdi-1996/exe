@@ -277,8 +277,9 @@ public sealed class MainForm : Form
 
     static string LastLines(string text, int count)
     {
-        var lines = text.Replace("", "").Split('
-', StringSplitOptions.RemoveEmptyEntries);
+        var lines = text.Split((char)10, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(x => x.TrimEnd((char)13))
+                        .ToArray();
         return string.Join(Environment.NewLine, lines.Length <= count ? lines : lines[(lines.Length-count)..]);
     }
 }
