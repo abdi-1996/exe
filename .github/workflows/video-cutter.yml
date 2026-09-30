@@ -1,0 +1,36 @@
+name: Build Quick Video Cutter EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'VideoCutter/**'
+      - '.github/workflows/video-cutter.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build standalone EXE
+        shell: pwsh
+        run: |
+          dotnet publish VideoCutter/QuickVideoCutter.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -o VideoCutter/publish
+      - name: Verify EXE
+        shell: pwsh
+        run: |
+          $exe = 'VideoCutter/publish/VideoCutter.exe'
+          if (!(Test-Path $exe)) { throw 'VideoCutter.exe not found' }
+          Get-Item $exe | Format-List Name,Length,FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuickVideoCutter-win-x64
+          path: VideoCutter/publish/VideoCutter.exe
+          if-no-files-found: error
