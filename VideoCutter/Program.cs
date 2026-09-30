@@ -1,278 +1,740 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using Microsoft.Win32;
 
 namespace QuickVideoCutter;
 
-internal static class Program
+public sealed class App : Application
 {
     [STAThread]
-    static void Main()
+    public static void Main()
     {
-        ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
+        var app = new App
+        {
+            ShutdownMode = ShutdownMode.OnMainWindowClose
+        };
+        app.Run(new MainWindow());
     }
 }
 
-public sealed class MainForm : Form
+public sealed class MainWindow : Window
 {
-    readonly TextBox inputBox = new() { ReadOnly = true, PlaceholderText = "Выберите видео..." };
-    readonly TextBox outputBox = new() { PlaceholderText = "Куда сохранить MP4..." };
-    readonly TextBox startBox = new() { Text = "00:00:00.000" };
-    readonly TextBox endBox = new() { Text = "00:00:10.000" };
-    readonly ComboBox modeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList };
-    readonly Button cutButton = new() { Text = "ВЫРЕЗАТЬ", Height = 44 };
-    readonly Button cancelButton = new() { Text = "Отмена", Height = 44, Enabled = false };
-    readonly Button folderButton = new() { Text = "Открыть папку", Enabled = false };
-    readonly ProgressBar progress = new() { Minimum = 0, Maximum = 100, Height = 18 };
-    readonly Label status = new() { Text = "Готово к работе", AutoSize = true };
+    readonly Grid root = new();
+    readonly MediaElement preview = new();
+    readonly TimelineControl timeline = new();
+    readonly TextBlock fileNameText = new();
+    readonly TextBlock statusText = new();
+    readonly TextBlock currentTimeText = new();
+    readonly TextBlock rangeText = new();
+    readonly Button playButton;
+    readonly Button exportButton;
+    readonly Button cancelButton;
+    readonly ComboBox modeBox = new();
+    readonly DispatcherTimer timer;
+    string? inputPath;
+    string? outputPath;
+    TimeSpan duration = TimeSpan.Zero;
+    bool isPlaying;
+    bool userSeeking;
     Process? activeProcess;
-    CancellationTokenSource? cts;
+    CancellationTokenSource? activeCts;
 
-    public MainForm()
+    static readonly Brush Bg = Brush("#0B0D10");
+    static readonly Brush Panel = Brush("#15181E");
+    static readonly Brush Panel2 = Brush("#1B1F27");
+    static readonly Brush Text = Brush("#F6F7F9");
+    static readonly Brush Muted = Brush("#9AA3B2");
+    static readonly Brush Accent = Brush("#6C7CFF");
+    static readonly Brush BorderBrush = Brush("#2A303A");
+
+    public MainWindow()
     {
-        Text = "Quick Video Cutter";
-        Width = 720;
-        Height = 430;
-        MinimumSize = new System.Drawing.Size(680, 410);
-        StartPosition = FormStartPosition.CenterScreen;
-        Font = new System.Drawing.Font("Segoe UI", 10F);
+        Title = "Quick Video Cutter";
+        Width = 1120;
+        Height = 760;
+        MinWidth = 860;
+        MinHeight = 620;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        Background = Bg;
+        Foreground = Text;
+        FontFamily = new FontFamily("Segoe UI");
         AllowDrop = true;
 
-        modeBox.Items.AddRange(new object[] {
-            "Быстро — без перекодирования",
-            "Точно — H.264 / AAC"
-        });
-        modeBox.SelectedIndex = 0;
+        root.Margin = new Thickness(24);
+        Content = root;
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(22), ColumnCount = 1, RowCount = 10 };
-        root.RowStyles.Clear();
-        for (int i = 0; i < 10; i++) root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        Controls.Add(root);
+        var header = BuildHeader();
+        Grid.SetRow(header, 0);
+        root.Children.Add(header);
 
-        var title = new Label { Text = "Quick Video Cutter", Font = new System.Drawing.Font("Segoe UI Semibold", 22F), AutoSize = true, Margin = new Padding(0,0,0,6) };
-        var subtitle = new Label { Text = "Быстрая резка видео на ПК", AutoSize = true, ForeColor = System.Drawing.Color.DimGray, Margin = new Padding(0,0,0,18) };
-        root.Controls.Add(title);
-        root.Controls.Add(subtitle);
+        var previewCard = BuildPreviewCard();
+        Grid.SetRow(previewCard, 1);
+        root.Children.Add(previewCard);
 
-        root.Controls.Add(MakeFileRow("Видео", inputBox, "Выбрать", PickInput));
-        root.Controls.Add(MakeTimesRow());
-        root.Controls.Add(MakeLabeled("Режим", modeBox));
-        root.Controls.Add(MakeFileRow("Сохранить", outputBox, "Обзор", PickOutput));
+        var timelineCard = BuildTimelineCard();
+        Grid.SetRow(timelineCard, 2);
+        root.Children.Add(timelineCard);
 
-        var actions = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true, Margin = new Padding(0,16,0,10) };
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 22));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 23));
-        cutButton.Dock = DockStyle.Fill; cancelButton.Dock = DockStyle.Fill; folderButton.Dock = DockStyle.Fill;
-        cutButton.Click += async (_, _) => await CutAsync();
-        cancelButton.Click += (_, _) => CancelCut();
-        folderButton.Click += (_, _) => OpenOutputFolder();
-        actions.Controls.Add(cutButton,0,0); actions.Controls.Add(cancelButton,1,0); actions.Controls.Add(folderButton,2,0);
-        root.Controls.Add(actions);
-        progress.Dock = DockStyle.Top;
-        root.Controls.Add(progress);
-        status.Margin = new Padding(0,10,0,0);
-        root.Controls.Add(status);
+        var footer = BuildFooter();
+        Grid.SetRow(footer, 3);
+        root.Children.Add(footer);
 
-        DragEnter += (_, e) => { if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true) e.Effect = DragDropEffects.Copy; };
-        DragDrop += (_, e) => {
-            if (e.Data?.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0) SetInput(files[0]);
+        playButton = (Button)((FrameworkElement)previewCard).FindName("PlayButton")!;
+        exportButton = (Button)((FrameworkElement)footer).FindName("ExportButton")!;
+        cancelButton = (Button)((FrameworkElement)footer).FindName("CancelButton")!;
+
+        timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        timer.Tick += (_, _) =>
+        {
+            if (!isPlaying || userSeeking || inputPath == null) return;
+            if (preview.Position >= timeline.End)
+            {
+                preview.Pause();
+                isPlaying = false;
+                playButton.Content = "▶";
+                preview.Position = timeline.Start;
+                timeline.SetPosition(timeline.Start);
+                UpdateTimeLabels(timeline.Start);
+                return;
+            }
+
+            timeline.SetPosition(preview.Position);
+            UpdateTimeLabels(preview.Position);
+        };
+        timer.Start();
+
+        timeline.SelectionChanged += (_, _) =>
+        {
+            rangeText.Text = $"{FormatTime(timeline.Start)}  →  {FormatTime(timeline.End)}   •   {FormatTime(timeline.End - timeline.Start)}";
+        };
+        timeline.SeekRequested += (_, value) =>
+        {
+            if (inputPath == null) return;
+            userSeeking = true;
+            preview.Position = value;
+            timeline.SetPosition(value);
+            UpdateTimeLabels(value);
+            userSeeking = false;
+        };
+
+        preview.MediaOpened += (_, _) =>
+        {
+            if (duration == TimeSpan.Zero && preview.NaturalDuration.HasTimeSpan)
+            {
+                duration = preview.NaturalDuration.TimeSpan;
+                timeline.SetDuration(duration);
+                timeline.SetSelection(TimeSpan.Zero, duration);
+                rangeText.Text = $"{FormatTime(TimeSpan.Zero)}  →  {FormatTime(duration)}   •   {FormatTime(duration)}";
+            }
+        };
+        preview.MediaEnded += (_, _) =>
+        {
+            isPlaying = false;
+            playButton.Content = "▶";
+        };
+
+        DragEnter += (_, e) =>
+        {
+            if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                e.Effects = DragDropEffects.Copy;
+        };
+        Drop += async (_, e) =>
+        {
+            if (e.Data.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
+                await LoadVideoAsync(files[0]);
         };
     }
 
-    Control MakeFileRow(string labelText, TextBox box, string buttonText, EventHandler handler)
+    FrameworkElement BuildHeader()
     {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true, Margin = new Padding(0,0,0,10) };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
-        var lab = new Label { Text = labelText, AutoSize = true, Anchor = AnchorStyles.Left };
-        box.Dock = DockStyle.Fill;
-        var btn = new Button { Text = buttonText, Dock = DockStyle.Fill, Height = 34 };
-        btn.Click += handler;
-        panel.Controls.Add(lab,0,0); panel.Controls.Add(box,1,0); panel.Controls.Add(btn,2,0);
-        return panel;
+        var grid = new Grid { Margin = new Thickness(0, 0, 0, 18) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var left = new StackPanel();
+        left.Children.Add(new TextBlock
+        {
+            Text = "Quick Video Cutter",
+            FontSize = 28,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Text
+        });
+        left.Children.Add(new TextBlock
+        {
+            Text = "Preview • Timeline • Precision trim",
+            FontSize = 13,
+            Foreground = Muted,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+
+        var open = MakeButton("＋  Открыть видео", Accent, Text, 150);
+        open.Click += async (_, _) =>
+        {
+            var dlg = new OpenFileDialog
+            {
+                Filter = "Видео|*.mp4;*.mov;*.mkv;*.avi;*.m4v;*.webm;*.mts;*.m2ts|Все файлы|*.*"
+            };
+            if (dlg.ShowDialog(this) == true)
+                await LoadVideoAsync(dlg.FileName);
+        };
+
+        grid.Children.Add(left);
+        Grid.SetColumn(open, 1);
+        grid.Children.Add(open);
+        return grid;
     }
 
-    Control MakeTimesRow()
+    FrameworkElement BuildPreviewCard()
     {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 4, AutoSize = true, Margin = new Padding(0,0,0,10) };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        panel.Controls.Add(new Label { Text = "Начало", AutoSize = true, Anchor = AnchorStyles.Left },0,0);
-        startBox.Dock = DockStyle.Fill; panel.Controls.Add(startBox,1,0);
-        panel.Controls.Add(new Label { Text = "Конец", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(12,0,0,0) },2,0);
-        endBox.Dock = DockStyle.Fill; panel.Controls.Add(endBox,3,0);
-        return panel;
+        var border = Card(new Thickness(0, 0, 0, 16));
+        border.Name = "PreviewCard";
+
+        var outer = new Grid { Margin = new Thickness(14) };
+        outer.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        outer.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var videoWrap = new Border
+        {
+            Background = Brushes.Black,
+            CornerRadius = new CornerRadius(16),
+            MinHeight = 330,
+            ClipToBounds = true
+        };
+        var videoGrid = new Grid();
+        preview.Stretch = Stretch.Uniform;
+        preview.LoadedBehavior = MediaState.Manual;
+        preview.UnloadedBehavior = MediaState.Manual;
+        preview.ScrubbingEnabled = true;
+        videoGrid.Children.Add(preview);
+
+        var placeholder = new StackPanel
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        placeholder.Children.Add(new TextBlock
+        {
+            Text = "🎬",
+            FontSize = 54,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Foreground = Muted
+        });
+        placeholder.Children.Add(new TextBlock
+        {
+            Text = "Откройте видео или перетащите его сюда",
+            FontSize = 15,
+            Margin = new Thickness(0, 10, 0, 0),
+            Foreground = Muted,
+            HorizontalAlignment = HorizontalAlignment.Center
+        });
+        placeholder.Name = "Placeholder";
+        videoGrid.Children.Add(placeholder);
+        videoWrap.Child = videoGrid;
+
+        var controls = new Grid { Margin = new Thickness(2, 14, 2, 0) };
+        controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        controls.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var back = MakeIconButton("−1s");
+        back.Click += (_, _) => SeekBy(-1);
+        controls.Children.Add(back);
+
+        var play = MakeIconButton("▶");
+        play.Name = "PlayButton";
+        play.Margin = new Thickness(8, 0, 8, 0);
+        play.Click += (_, _) => TogglePlayback();
+        Grid.SetColumn(play, 1);
+        controls.Children.Add(play);
+
+        var forward = MakeIconButton("+1s");
+        forward.Click += (_, _) => SeekBy(1);
+        Grid.SetColumn(forward, 2);
+        controls.Children.Add(forward);
+
+        fileNameText.Text = "Нет видео";
+        fileNameText.Foreground = Muted;
+        fileNameText.VerticalAlignment = VerticalAlignment.Center;
+        fileNameText.TextTrimming = TextTrimming.CharacterEllipsis;
+        fileNameText.Margin = new Thickness(14, 0, 14, 0);
+        Grid.SetColumn(fileNameText, 3);
+        controls.Children.Add(fileNameText);
+
+        currentTimeText.Text = "00:00.000 / 00:00.000";
+        currentTimeText.Foreground = Text;
+        currentTimeText.FontFamily = new FontFamily("Consolas");
+        currentTimeText.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(currentTimeText, 4);
+        controls.Children.Add(currentTimeText);
+
+        outer.Children.Add(videoWrap);
+        Grid.SetRow(controls, 1);
+        outer.Children.Add(controls);
+
+        border.Child = outer;
+        border.RegisterName("PlayButton", play);
+        border.RegisterName("Placeholder", placeholder);
+        return border;
     }
 
-    Control MakeLabeled(string labelText, Control control)
+    FrameworkElement BuildTimelineCard()
     {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true, Margin = new Padding(0,0,0,10) };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        panel.Controls.Add(new Label { Text = labelText, AutoSize = true, Anchor = AnchorStyles.Left },0,0);
-        control.Dock = DockStyle.Fill; panel.Controls.Add(control,1,0);
-        return panel;
+        var border = Card(new Thickness(0, 0, 0, 16));
+        var stack = new StackPanel { Margin = new Thickness(16) };
+
+        var top = new Grid { Margin = new Thickness(0, 0, 0, 10) };
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        top.Children.Add(new TextBlock
+        {
+            Text = "Дорожка",
+            FontSize = 16,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Text
+        });
+
+        rangeText.Text = "00:00.000  →  00:00.000";
+        rangeText.Foreground = Muted;
+        rangeText.FontFamily = new FontFamily("Consolas");
+        Grid.SetColumn(rangeText, 1);
+        top.Children.Add(rangeText);
+
+        timeline.Height = 112;
+        timeline.HorizontalAlignment = HorizontalAlignment.Stretch;
+        timeline.Margin = new Thickness(0, 2, 0, 10);
+
+        var hint = new TextBlock
+        {
+            Text = "Перетаскивайте левый и правый маркеры для обрезки. Клик по дорожке перемещает курсор.",
+            FontSize = 12,
+            Foreground = Muted
+        };
+
+        stack.Children.Add(top);
+        stack.Children.Add(timeline);
+        stack.Children.Add(hint);
+        border.Child = stack;
+        return border;
     }
 
-    void PickInput(object? sender, EventArgs e)
+    FrameworkElement BuildFooter()
     {
-        using var dlg = new OpenFileDialog { Filter = "Видео|*.mp4;*.mov;*.mkv;*.avi;*.m4v;*.webm;*.mts;*.m2ts|Все файлы|*.*" };
-        if (dlg.ShowDialog(this) == DialogResult.OK) SetInput(dlg.FileName);
+        var border = Card(new Thickness(0));
+        border.Padding = new Thickness(16);
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var left = new StackPanel();
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+
+        row.Children.Add(new TextBlock
+        {
+            Text = "Экспорт:",
+            Foreground = Muted,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 10, 0)
+        });
+
+        modeBox.Items.Add("Быстро — без перекодирования");
+        modeBox.Items.Add("Точно — H.264 / AAC");
+        modeBox.SelectedIndex = 0;
+        modeBox.MinWidth = 240;
+        modeBox.Height = 38;
+        modeBox.Background = Panel2;
+        modeBox.Foreground = Text;
+        modeBox.BorderBrush = BorderBrush;
+        modeBox.Padding = new Thickness(10, 5, 10, 5);
+        row.Children.Add(modeBox);
+
+        left.Children.Add(row);
+        statusText.Text = "Готово к работе";
+        statusText.Foreground = Muted;
+        statusText.Margin = new Thickness(0, 8, 0, 0);
+        left.Children.Add(statusText);
+        grid.Children.Add(left);
+
+        var cancel = MakeButton("Отмена", Panel2, Text, 110);
+        cancel.Name = "CancelButton";
+        cancel.IsEnabled = false;
+        cancel.Margin = new Thickness(12, 0, 0, 0);
+        cancel.Click += (_, _) => CancelExport();
+        Grid.SetColumn(cancel, 1);
+        grid.Children.Add(cancel);
+
+        var export = MakeButton("Экспортировать", Accent, Text, 160);
+        export.Name = "ExportButton";
+        export.Margin = new Thickness(12, 0, 0, 0);
+        export.Click += async (_, _) => await ExportAsync();
+        Grid.SetColumn(export, 2);
+        grid.Children.Add(export);
+
+        border.Child = grid;
+        border.RegisterName("ExportButton", export);
+        border.RegisterName("CancelButton", cancel);
+        return border;
     }
 
-    void SetInput(string path)
+    async Task LoadVideoAsync(string path)
     {
-        inputBox.Text = path;
-        var dir = Path.GetDirectoryName(path) ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-        var name = Path.GetFileNameWithoutExtension(path);
-        outputBox.Text = Path.Combine(dir, name + "_cut.mp4");
-        folderButton.Enabled = false;
+        if (!File.Exists(path)) return;
+
+        try
+        {
+            inputPath = path;
+            outputPath = Path.Combine(
+                Path.GetDirectoryName(path) ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                Path.GetFileNameWithoutExtension(path) + "_cut.mp4");
+
+            statusText.Text = "Открываю видео...";
+            fileNameText.Text = Path.GetFileName(path);
+            preview.Stop();
+            preview.Source = new Uri(path, UriKind.Absolute);
+            preview.Position = TimeSpan.Zero;
+            preview.Play();
+            preview.Pause();
+            isPlaying = false;
+            playButton.Content = "▶";
+
+            var placeholder = FindVisualChild<StackPanel>(root, "Placeholder");
+            if (placeholder != null) placeholder.Visibility = Visibility.Collapsed;
+
+            var tools = await EnsureFfmpegAsync(CancellationToken.None);
+            duration = await ProbeDurationAsync(tools.ffprobe, path);
+            if (duration <= TimeSpan.Zero)
+                duration = TimeSpan.FromSeconds(1);
+
+            timeline.SetDuration(duration);
+            timeline.SetSelection(TimeSpan.Zero, duration);
+            timeline.SetPosition(TimeSpan.Zero);
+            UpdateTimeLabels(TimeSpan.Zero);
+            rangeText.Text = $"{FormatTime(TimeSpan.Zero)}  →  {FormatTime(duration)}   •   {FormatTime(duration)}";
+
+            statusText.Text = "Создаю миниатюры дорожки...";
+            var thumbs = await GenerateThumbnailsAsync(tools.ffmpeg, path, duration);
+            timeline.SetThumbnails(thumbs);
+            statusText.Text = "Готово";
+        }
+        catch (Exception ex)
+        {
+            statusText.Text = "Ошибка загрузки";
+            MessageBox.Show(this, ex.Message, "Video Cutter", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
-    void PickOutput(object? sender, EventArgs e)
+    void TogglePlayback()
     {
-        using var dlg = new SaveFileDialog { Filter = "MP4 видео|*.mp4", DefaultExt = "mp4", AddExtension = true, FileName = string.IsNullOrWhiteSpace(outputBox.Text) ? "cut.mp4" : Path.GetFileName(outputBox.Text) };
-        if (!string.IsNullOrWhiteSpace(outputBox.Text)) dlg.InitialDirectory = Path.GetDirectoryName(outputBox.Text);
-        if (dlg.ShowDialog(this) == DialogResult.OK) outputBox.Text = dlg.FileName;
+        if (inputPath == null) return;
+
+        if (isPlaying)
+        {
+            preview.Pause();
+            isPlaying = false;
+            playButton.Content = "▶";
+        }
+        else
+        {
+            if (preview.Position < timeline.Start || preview.Position >= timeline.End)
+                preview.Position = timeline.Start;
+            preview.Play();
+            isPlaying = true;
+            playButton.Content = "⏸";
+        }
     }
 
-    async Task CutAsync()
+    void SeekBy(double seconds)
     {
-        if (!File.Exists(inputBox.Text)) { MessageBox.Show(this, "Сначала выберите видео.", "Video Cutter", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-        if (!TryParseTime(startBox.Text, out var start) || !TryParseTime(endBox.Text, out var end) || end <= start)
-        { MessageBox.Show(this, "Проверьте время. Пример: 00:01:12.500", "Video Cutter", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-        if (string.IsNullOrWhiteSpace(outputBox.Text)) { MessageBox.Show(this, "Укажите файл сохранения."); return; }
+        if (inputPath == null) return;
+        var next = preview.Position + TimeSpan.FromSeconds(seconds);
+        if (next < TimeSpan.Zero) next = TimeSpan.Zero;
+        if (next > duration) next = duration;
+        preview.Position = next;
+        timeline.SetPosition(next);
+        UpdateTimeLabels(next);
+    }
+
+    void UpdateTimeLabels(TimeSpan current)
+    {
+        currentTimeText.Text = $"{FormatTime(current)} / {FormatTime(duration)}";
+    }
+
+    async Task ExportAsync()
+    {
+        if (inputPath == null || !File.Exists(inputPath))
+        {
+            MessageBox.Show(this, "Сначала откройте видео.", "Video Cutter", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var save = new SaveFileDialog
+        {
+            Filter = "MP4 video|*.mp4",
+            DefaultExt = ".mp4",
+            AddExtension = true,
+            FileName = Path.GetFileName(outputPath ?? "cut.mp4"),
+            InitialDirectory = Path.GetDirectoryName(outputPath ?? inputPath)
+        };
+
+        if (save.ShowDialog(this) != true) return;
+        outputPath = save.FileName;
 
         try
         {
             SetBusy(true);
-            cts = new CancellationTokenSource();
-            status.Text = "Подготовка FFmpeg...";
-            var ffmpeg = await EnsureFfmpegAsync(cts.Token);
-            status.Text = "Режу видео...";
-            progress.Value = 0;
+            activeCts = new CancellationTokenSource();
+            var tools = await EnsureFfmpegAsync(activeCts.Token);
 
-            var psi = new ProcessStartInfo(ffmpeg) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            psi.ArgumentList.Add("-hide_banner"); psi.ArgumentList.Add("-y");
-            psi.ArgumentList.Add("-ss"); psi.ArgumentList.Add(start.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
-            psi.ArgumentList.Add("-i"); psi.ArgumentList.Add(inputBox.Text);
-            psi.ArgumentList.Add("-t"); psi.ArgumentList.Add((end-start).TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+            var start = timeline.Start;
+            var end = timeline.End;
+            var span = end - start;
+            if (span <= TimeSpan.Zero)
+                throw new InvalidOperationException("Диапазон обрезки пустой.");
+
+            statusText.Text = "Экспорт 0%";
+
+            var psi = new ProcessStartInfo(tools.ffmpeg)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            void A(string v) => psi.ArgumentList.Add(v);
+
+            A("-hide_banner"); A("-y");
+            A("-ss"); A(start.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+            A("-i"); A(inputPath);
+            A("-t"); A(span.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+
             if (modeBox.SelectedIndex == 0)
             {
-                psi.ArgumentList.Add("-c"); psi.ArgumentList.Add("copy");
-                psi.ArgumentList.Add("-avoid_negative_ts"); psi.ArgumentList.Add("make_zero");
+                A("-c"); A("copy");
+                A("-avoid_negative_ts"); A("make_zero");
             }
             else
             {
-                psi.ArgumentList.Add("-c:v"); psi.ArgumentList.Add("libx264");
-                psi.ArgumentList.Add("-preset"); psi.ArgumentList.Add("veryfast");
-                psi.ArgumentList.Add("-crf"); psi.ArgumentList.Add("18");
-                psi.ArgumentList.Add("-c:a"); psi.ArgumentList.Add("aac");
-                psi.ArgumentList.Add("-b:a"); psi.ArgumentList.Add("192k");
-                psi.ArgumentList.Add("-movflags"); psi.ArgumentList.Add("+faststart");
+                A("-c:v"); A("libx264");
+                A("-preset"); A("veryfast");
+                A("-crf"); A("18");
+                A("-c:a"); A("aac");
+                A("-b:a"); A("192k");
+                A("-movflags"); A("+faststart");
             }
-            psi.ArgumentList.Add("-progress"); psi.ArgumentList.Add("pipe:1"); psi.ArgumentList.Add("-nostats");
-            psi.ArgumentList.Add(outputBox.Text);
 
-            activeProcess = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            A("-progress"); A("pipe:1");
+            A("-nostats");
+            A(outputPath);
+
+            activeProcess = new Process { StartInfo = psi };
             activeProcess.Start();
-            var stderrTask = activeProcess.StandardError.ReadToEndAsync();
-            var durationSec = Math.Max(0.001, (end-start).TotalSeconds);
+            var errTask = activeProcess.StandardError.ReadToEndAsync();
+
             while (!activeProcess.StandardOutput.EndOfStream)
             {
-                cts.Token.ThrowIfCancellationRequested();
+                activeCts.Token.ThrowIfCancellationRequested();
                 var line = await activeProcess.StandardOutput.ReadLineAsync();
                 if (line == null) break;
-                if (line.StartsWith("out_time_us=", StringComparison.Ordinal) && long.TryParse(line[12..], out var us))
-                    progress.Value = Math.Clamp((int)Math.Round((us / 1_000_000.0) / durationSec * 100), 0, 100);
-                else if (line.StartsWith("out_time_ms=", StringComparison.Ordinal) && long.TryParse(line[12..], out var ms))
-                    progress.Value = Math.Clamp((int)Math.Round((ms / 1_000_000.0) / durationSec * 100), 0, 100);
+
+                if (line.StartsWith("out_time_us=", StringComparison.Ordinal) &&
+                    long.TryParse(line[12..], out var us))
+                {
+                    var pct = Math.Clamp((int)Math.Round((us / 1_000_000.0) / Math.Max(0.001, span.TotalSeconds) * 100), 0, 100);
+                    statusText.Text = $"Экспорт {pct}%";
+                }
             }
-            await activeProcess.WaitForExitAsync(cts.Token);
-            var err = await stderrTask;
-            if (activeProcess.ExitCode != 0) throw new Exception(string.IsNullOrWhiteSpace(err) ? "FFmpeg завершился с ошибкой." : LastLines(err, 12));
-            progress.Value = 100;
-            status.Text = "Готово: " + Path.GetFileName(outputBox.Text);
-            folderButton.Enabled = true;
-            MessageBox.Show(this, "Фрагмент сохранён!", "Video Cutter", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            await activeProcess.WaitForExitAsync(activeCts.Token);
+            var err = await errTask;
+
+            if (activeProcess.ExitCode != 0)
+                throw new Exception(string.IsNullOrWhiteSpace(err) ? "FFmpeg завершился с ошибкой." : LastLines(err, 10));
+
+            statusText.Text = "Экспорт завершён";
+            MessageBox.Show(this, "Видео сохранено.", "Video Cutter", MessageBoxButton.OK, MessageBoxImage.Information);
         }
-        catch (OperationCanceledException) { status.Text = "Операция отменена"; }
-        catch (Exception ex) { status.Text = "Ошибка"; MessageBox.Show(this, ex.Message, "Video Cutter — ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-        finally { activeProcess?.Dispose(); activeProcess = null; cts?.Dispose(); cts = null; SetBusy(false); }
+        catch (OperationCanceledException)
+        {
+            statusText.Text = "Экспорт отменён";
+        }
+        catch (Exception ex)
+        {
+            statusText.Text = "Ошибка экспорта";
+            MessageBox.Show(this, ex.Message, "Video Cutter", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            activeProcess?.Dispose();
+            activeProcess = null;
+            activeCts?.Dispose();
+            activeCts = null;
+            SetBusy(false);
+        }
     }
 
-    void CancelCut()
+    void CancelExport()
     {
-        try { cts?.Cancel(); if (activeProcess is { HasExited: false }) activeProcess.Kill(true); } catch { }
+        try
+        {
+            activeCts?.Cancel();
+            if (activeProcess is { HasExited: false })
+                activeProcess.Kill(true);
+        }
+        catch { }
     }
 
     void SetBusy(bool busy)
     {
-        cutButton.Enabled = !busy; cancelButton.Enabled = busy; modeBox.Enabled = !busy; startBox.Enabled = !busy; endBox.Enabled = !busy;
+        exportButton.IsEnabled = !busy;
+        cancelButton.IsEnabled = busy;
+        modeBox.IsEnabled = !busy;
     }
 
-    void OpenOutputFolder()
-    {
-        if (string.IsNullOrWhiteSpace(outputBox.Text)) return;
-        var dir = Path.GetDirectoryName(outputBox.Text);
-        if (!string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir)) Process.Start(new ProcessStartInfo("explorer.exe", dir) { UseShellExecute = true });
-    }
-
-    static bool TryParseTime(string text, out TimeSpan value)
-    {
-        value = default;
-        text = text.Trim().Replace(',', '.');
-        if (TimeSpan.TryParse(text, CultureInfo.InvariantCulture, out value) && value >= TimeSpan.Zero) return true;
-        var p = text.Split(':');
-        try
-        {
-            double sec; int min=0, hour=0;
-            if (p.Length == 1) sec = double.Parse(p[0], CultureInfo.InvariantCulture);
-            else if (p.Length == 2) { min = int.Parse(p[0]); sec = double.Parse(p[1], CultureInfo.InvariantCulture); }
-            else if (p.Length == 3) { hour = int.Parse(p[0]); min = int.Parse(p[1]); sec = double.Parse(p[2], CultureInfo.InvariantCulture); }
-            else return false;
-            if (sec < 0 || min < 0 || hour < 0) return false;
-            value = TimeSpan.FromHours(hour) + TimeSpan.FromMinutes(min) + TimeSpan.FromSeconds(sec);
-            return true;
-        } catch { return false; }
-    }
-
-    static async Task<string> EnsureFfmpegAsync(CancellationToken token)
+    static async Task<(string ffmpeg, string ffprobe)> EnsureFfmpegAsync(CancellationToken token)
     {
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuickVideoCutter");
         Directory.CreateDirectory(dir);
-        var exe = Path.Combine(dir, "ffmpeg.exe");
-        if (File.Exists(exe)) return exe;
+
+        var ffmpeg = Path.Combine(dir, "ffmpeg.exe");
+        var ffprobe = Path.Combine(dir, "ffprobe.exe");
+
+        if (File.Exists(ffmpeg) && File.Exists(ffprobe))
+            return (ffmpeg, ffprobe);
 
         var zipPath = Path.Combine(dir, "ffmpeg.zip");
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("QuickVideoCutter/1.0");
-        using (var response = await http.GetAsync("https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip", HttpCompletionOption.ResponseHeadersRead, token))
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("QuickVideoCutter/2.0");
+
+        using (var response = await http.GetAsync(
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            HttpCompletionOption.ResponseHeadersRead,
+            token))
         {
             response.EnsureSuccessStatusCode();
             await using var src = await response.Content.ReadAsStreamAsync(token);
             await using var dst = File.Create(zipPath);
             await src.CopyToAsync(dst, token);
         }
+
         using (var zip = ZipFile.OpenRead(zipPath))
         {
-            var entry = System.Linq.Enumerable.FirstOrDefault(zip.Entries, e => e.FullName.EndsWith("/bin/ffmpeg.exe", StringComparison.OrdinalIgnoreCase));
-            if (entry == null) throw new InvalidDataException("В архиве FFmpeg не найден ffmpeg.exe");
-            entry.ExtractToFile(exe, true);
+            var f1 = zip.Entries.FirstOrDefault(e => e.FullName.EndsWith("/bin/ffmpeg.exe", StringComparison.OrdinalIgnoreCase))
+                     ?? throw new InvalidDataException("ffmpeg.exe не найден в архиве.");
+            var f2 = zip.Entries.FirstOrDefault(e => e.FullName.EndsWith("/bin/ffprobe.exe", StringComparison.OrdinalIgnoreCase))
+                     ?? throw new InvalidDataException("ffprobe.exe не найден в архиве.");
+            f1.ExtractToFile(ffmpeg, true);
+            f2.ExtractToFile(ffprobe, true);
         }
+
         try { File.Delete(zipPath); } catch { }
-        return exe;
+        return (ffmpeg, ffprobe);
+    }
+
+    static async Task<TimeSpan> ProbeDurationAsync(string ffprobe, string file)
+    {
+        var psi = new ProcessStartInfo(ffprobe)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        psi.ArgumentList.Add("-v");
+        psi.ArgumentList.Add("error");
+        psi.ArgumentList.Add("-show_entries");
+        psi.ArgumentList.Add("format=duration");
+        psi.ArgumentList.Add("-of");
+        psi.ArgumentList.Add("default=noprint_wrappers=1:nokey=1");
+        psi.ArgumentList.Add(file);
+
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException("Не удалось запустить ffprobe.");
+        var text = await p.StandardOutput.ReadToEndAsync();
+        await p.WaitForExitAsync();
+
+        if (double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var sec) && sec > 0)
+            return TimeSpan.FromSeconds(sec);
+
+        return TimeSpan.Zero;
+    }
+
+    static async Task<List<BitmapImage>> GenerateThumbnailsAsync(string ffmpeg, string file, TimeSpan duration)
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "QuickVideoCutter", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        var pattern = Path.Combine(temp, "thumb_%02d.jpg");
+        var interval = Math.Max(0.2, duration.TotalSeconds / 12.0);
+
+        var psi = new ProcessStartInfo(ffmpeg)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true
+        };
+
+        psi.ArgumentList.Add("-hide_banner");
+        psi.ArgumentList.Add("-loglevel");
+        psi.ArgumentList.Add("error");
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add(file);
+        psi.ArgumentList.Add("-vf");
+        psi.ArgumentList.Add($"fps=1/{interval.ToString("0.###", CultureInfo.InvariantCulture)},scale=240:-2");
+        psi.ArgumentList.Add("-frames:v");
+        psi.ArgumentList.Add("12");
+        psi.ArgumentList.Add("-q:v");
+        psi.ArgumentList.Add("3");
+        psi.ArgumentList.Add(pattern);
+
+        using (var p = Process.Start(psi))
+        {
+            if (p != null)
+                await p.WaitForExitAsync();
+        }
+
+        var list = new List<BitmapImage>();
+        foreach (var path in Directory.GetFiles(temp, "thumb_*.jpg").OrderBy(x => x))
+        {
+            var img = new BitmapImage();
+            img.BeginInit();
+            img.CacheOption = BitmapCacheOption.OnLoad;
+            img.UriSource = new Uri(path, UriKind.Absolute);
+            img.EndInit();
+            img.Freeze();
+            list.Add(img);
+        }
+
+        try { Directory.Delete(temp, true); } catch { }
+        return list;
+    }
+
+    static string FormatTime(TimeSpan t)
+    {
+        if (t < TimeSpan.Zero) t = TimeSpan.Zero;
+        if (t.TotalHours >= 1)
+            return t.ToString(@"hh\:mm\:ss\.fff", CultureInfo.InvariantCulture);
+        return t.ToString(@"mm\:ss\.fff", CultureInfo.InvariantCulture);
     }
 
     static string LastLines(string text, int count)
@@ -280,6 +742,280 @@ public sealed class MainForm : Form
         var lines = text.Split((char)10, StringSplitOptions.RemoveEmptyEntries)
                         .Select(x => x.TrimEnd((char)13))
                         .ToArray();
-        return string.Join(Environment.NewLine, lines.Length <= count ? lines : lines[(lines.Length-count)..]);
+        return string.Join(Environment.NewLine, lines.Length <= count ? lines : lines[(lines.Length - count)..]);
+    }
+
+    static Border Card(Thickness margin) => new()
+    {
+        Background = Panel,
+        BorderBrush = BorderBrush,
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(18),
+        Margin = margin
+    };
+
+    static Button MakeButton(string text, Brush background, Brush foreground, double width)
+    {
+        var b = new Button
+        {
+            Content = text,
+            Width = width,
+            Height = 42,
+            Background = background,
+            Foreground = foreground,
+            BorderBrush = Brushes.Transparent,
+            FontWeight = FontWeights.SemiBold,
+            Cursor = Cursors.Hand
+        };
+        return b;
+    }
+
+    static Button MakeIconButton(string text)
+    {
+        return new Button
+        {
+            Content = text,
+            Width = 50,
+            Height = 38,
+            Background = Panel2,
+            Foreground = Text,
+            BorderBrush = BorderBrush,
+            BorderThickness = new Thickness(1),
+            FontWeight = FontWeights.SemiBold,
+            Cursor = Cursors.Hand
+        };
+    }
+
+    static SolidColorBrush Brush(string hex)
+    {
+        return new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
+    }
+
+    static T? FindVisualChild<T>(DependencyObject parent, string name) where T : FrameworkElement
+    {
+        var count = VisualTreeHelper.GetChildrenCount(parent);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T typed && typed.Name == name) return typed;
+            var nested = FindVisualChild<T>(child, name);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
+}
+
+public sealed class TimelineControl : FrameworkElement
+{
+    readonly List<BitmapImage> thumbnails = new();
+    TimeSpan duration = TimeSpan.FromSeconds(1);
+    TimeSpan start = TimeSpan.Zero;
+    TimeSpan end = TimeSpan.FromSeconds(1);
+    TimeSpan position = TimeSpan.Zero;
+    DragMode dragMode = DragMode.None;
+
+    public event EventHandler? SelectionChanged;
+    public event EventHandler<TimeSpan>? SeekRequested;
+
+    public TimeSpan Start => start;
+    public TimeSpan End => end;
+
+    enum DragMode { None, Start, End, Position }
+
+    public TimelineControl()
+    {
+        Focusable = true;
+        Cursor = Cursors.Hand;
+        MouseLeftButtonDown += OnMouseDown;
+        MouseLeftButtonUp += OnMouseUp;
+        MouseMove += OnMouseMove;
+        MouseWheel += OnMouseWheel;
+    }
+
+    public void SetDuration(TimeSpan value)
+    {
+        duration = value <= TimeSpan.Zero ? TimeSpan.FromSeconds(1) : value;
+        start = TimeSpan.Zero;
+        end = duration;
+        position = TimeSpan.Zero;
+        InvalidateVisual();
+    }
+
+    public void SetSelection(TimeSpan a, TimeSpan b)
+    {
+        start = Clamp(a);
+        end = Clamp(b);
+        if (end < start) (start, end) = (end, start);
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
+        InvalidateVisual();
+    }
+
+    public void SetPosition(TimeSpan value)
+    {
+        position = Clamp(value);
+        InvalidateVisual();
+    }
+
+    public void SetThumbnails(IEnumerable<BitmapImage> images)
+    {
+        thumbnails.Clear();
+        thumbnails.AddRange(images);
+        InvalidateVisual();
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        base.OnRender(dc);
+        var w = Math.Max(1, ActualWidth);
+        var h = Math.Max(1, ActualHeight);
+        var r = new Rect(0, 0, w, h);
+
+        dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(12, 14, 18)), null, r, 12, 12);
+
+        if (thumbnails.Count > 0)
+        {
+            var cellW = w / thumbnails.Count;
+            for (var i = 0; i < thumbnails.Count; i++)
+            {
+                var cell = new Rect(i * cellW, 0, cellW + 1, h);
+                dc.PushClip(new RectangleGeometry(cell));
+                dc.DrawImage(thumbnails[i], cell);
+                dc.Pop();
+            }
+        }
+        else
+        {
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(26, 30, 37)), null, r, 12, 12);
+            var ft = new FormattedText(
+                "Timeline preview",
+                CultureInfo.InvariantCulture,
+                FlowDirection.LeftToRight,
+                new Typeface("Segoe UI"),
+                14,
+                new SolidColorBrush(Color.FromRgb(132, 142, 158)),
+                VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            dc.DrawText(ft, new Point(14, (h - ft.Height) / 2));
+        }
+
+        var sx = X(start);
+        var ex = X(end);
+        var px = X(position);
+
+        var shade = new SolidColorBrush(Color.FromArgb(150, 0, 0, 0));
+        if (sx > 0) dc.DrawRectangle(shade, null, new Rect(0, 0, sx, h));
+        if (ex < w) dc.DrawRectangle(shade, null, new Rect(ex, 0, w - ex, h));
+
+        var accent = new SolidColorBrush(Color.FromRgb(108, 124, 255));
+        dc.DrawRectangle(null, new Pen(accent, 3), new Rect(sx, 1.5, Math.Max(1, ex - sx), h - 3));
+
+        DrawHandle(dc, sx, h, accent, true);
+        DrawHandle(dc, ex, h, accent, false);
+
+        var playPen = new Pen(Brushes.White, 2);
+        dc.DrawLine(playPen, new Point(px, 0), new Point(px, h));
+        dc.DrawEllipse(Brushes.White, null, new Point(px, 8), 4, 4);
+    }
+
+    static void DrawHandle(DrawingContext dc, double x, double h, Brush accent, bool left)
+    {
+        var width = 13.0;
+        var rect = new Rect(left ? x : x - width, 0, width, h);
+        dc.DrawRoundedRectangle(accent, null, rect, 6, 6);
+
+        var pen = new Pen(new SolidColorBrush(Color.FromArgb(220, 255, 255, 255)), 1.4);
+        var cx = left ? x + 6 : x - 6;
+        dc.DrawLine(pen, new Point(cx - 1.8, h / 2 - 9), new Point(cx - 1.8, h / 2 + 9));
+        dc.DrawLine(pen, new Point(cx + 1.8, h / 2 - 9), new Point(cx + 1.8, h / 2 + 9));
+    }
+
+    void OnMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        Focus();
+        CaptureMouse();
+        var x = e.GetPosition(this).X;
+        var sx = X(start);
+        var ex = X(end);
+
+        if (Math.Abs(x - sx) <= 18)
+            dragMode = DragMode.Start;
+        else if (Math.Abs(x - ex) <= 18)
+            dragMode = DragMode.End;
+        else
+        {
+            dragMode = DragMode.Position;
+            position = TimeAt(x);
+            SeekRequested?.Invoke(this, position);
+            InvalidateVisual();
+        }
+    }
+
+    void OnMouseMove(object sender, MouseEventArgs e)
+    {
+        if (dragMode == DragMode.None || e.LeftButton != MouseButtonState.Pressed) return;
+        var t = TimeAt(e.GetPosition(this).X);
+
+        if (dragMode == DragMode.Start)
+        {
+            var max = end - TimeSpan.FromMilliseconds(100);
+            start = t > max ? max : t;
+            if (start < TimeSpan.Zero) start = TimeSpan.Zero;
+            if (position < start) position = start;
+            SelectionChanged?.Invoke(this, EventArgs.Empty);
+        }
+        else if (dragMode == DragMode.End)
+        {
+            var min = start + TimeSpan.FromMilliseconds(100);
+            end = t < min ? min : t;
+            if (end > duration) end = duration;
+            if (position > end) position = end;
+            SelectionChanged?.Invoke(this, EventArgs.Empty);
+        }
+        else
+        {
+            position = t;
+            SeekRequested?.Invoke(this, position);
+        }
+
+        InvalidateVisual();
+    }
+
+    void OnMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (dragMode == DragMode.Start || dragMode == DragMode.End)
+        {
+            if (position < start || position > end)
+                position = start;
+            SeekRequested?.Invoke(this, position);
+        }
+
+        dragMode = DragMode.None;
+        ReleaseMouseCapture();
+    }
+
+    void OnMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        var delta = e.Delta > 0 ? 0.5 : -0.5;
+        position = Clamp(position + TimeSpan.FromSeconds(delta));
+        SeekRequested?.Invoke(this, position);
+        InvalidateVisual();
+    }
+
+    double X(TimeSpan t)
+    {
+        return ActualWidth <= 0 ? 0 : Math.Clamp(t.TotalSeconds / Math.Max(0.001, duration.TotalSeconds), 0, 1) * ActualWidth;
+    }
+
+    TimeSpan TimeAt(double x)
+    {
+        if (ActualWidth <= 0) return TimeSpan.Zero;
+        var ratio = Math.Clamp(x / ActualWidth, 0, 1);
+        return TimeSpan.FromSeconds(duration.TotalSeconds * ratio);
+    }
+
+    TimeSpan Clamp(TimeSpan value)
+    {
+        if (value < TimeSpan.Zero) return TimeSpan.Zero;
+        if (value > duration) return duration;
+        return value;
     }
 }
