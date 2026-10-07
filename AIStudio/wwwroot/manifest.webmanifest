@@ -1,0 +1,11 @@
+{
+  "name": "AI Studio",
+  "short_name": "AI Studio",
+  "description": "Контроллер ComfyUI для Windows, iPhone и Android",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090b10",
+  "theme_color": "#090b10",
+  "icons": [{ "src": "/icons/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
+

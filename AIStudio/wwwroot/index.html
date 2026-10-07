@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090b10">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>AI Studio</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="authGate" class="auth-gate hidden">
+    <form id="authForm" class="auth-card">
+      <img src="/icons/logo.svg" alt="">
+      <h1>AI Studio</h1><p>Введите токен доступа с компьютера AI Studio.</p>
+      <input id="authToken" type="password" autocomplete="current-password" placeholder="Токен доступа" required>
+      <button class="primary" type="submit">Подключиться</button><small id="authError"></small>
+    </form>
+  </div>
+
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><img src="/icons/logo.svg" alt=""><div><strong>AI Studio</strong><span>ComfyUI workspace</span></div></div>
+      <nav id="nav">
+        <button data-page="generation" class="active"><i>✦</i><span>Генерация</span></button>
+        <button data-page="workflow"><i>⌘</i><span>Workflow</span></button>
+        <button data-page="references"><i>◫</i><span>Референсы</span></button>
+        <button data-page="gallery"><i>▧</i><span>Галерея</span></button>
+        <button data-page="assistant"><i>◎</i><span>ИИ-ассистент</span></button>
+        <button data-page="models"><i>◇</i><span>Модели и LoRA</span></button>
+        <button data-page="nodes"><i>⬡</i><span>Ноды</span></button>
+        <button data-page="optimization"><i>↯</i><span>Оптимизация</span></button>
+        <button data-page="settings"><i>⚙</i><span>Настройки</span></button>
+      </nav>
+      <div class="engine-mini"><span id="engineDot" class="dot"></span><div><strong id="engineLabel">Проверка…</strong><small id="engineUrl">ComfyUI</small></div></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <button id="menuButton" class="icon-button mobile-only" aria-label="Меню">☰</button>
+        <div><h1 id="pageTitle">Генерация</h1><p id="pageSubtitle">Параметры текущего workflow</p></div>
+        <div class="status-row">
+          <span class="metric"><b id="gpuMetric">GPU —</b><small id="vramMetric">VRAM —</small></span>
+          <span class="metric"><b id="queueMetric">Очередь 0</b><small id="ramMetric">RAM —</small></span>
+        </div>
+      </header>
+
+      <section id="page-generation" class="page active">
+        <div class="generation-layout">
+          <div class="panel controls-panel">
+            <div class="panel-head"><div><span class="eyebrow">CURRENT WORKFLOW</span><h2 id="workflowTitle">Workflow не выбран</h2></div><button id="importButton" class="ghost">Импорт JSON</button></div>
+            <input id="workflowFile" type="file" accept="application/json,.json" hidden>
+            <label class="field"><span>Workflow</span><select id="workflowSelect"><option value="">Выберите workflow</option></select></label>
+            <div id="workflowAlerts"></div>
+            <div id="dynamicForm" class="dynamic-form"><div class="empty"><b>Импортируйте API JSON или UI JSON</b><span>Форма будет построена по реальным входам нод подключённого ComfyUI.</span></div></div>
+            <div class="enhancer card-row"><label class="switch"><input id="enhancerToggle" type="checkbox"><span></span></label><div><b>Prompt Enhancer</b><small>Показывает улучшенный промт до запуска</small></div><label class="tiny-check"><input id="autoContinue" type="checkbox"> автопродолжение</label></div>
+            <div id="enhancedBox" class="enhanced-box hidden"><div class="panel-head"><b>Улучшенный промт</b><button id="discardEnhanced" class="text-button">Сбросить</button></div><textarea id="enhancedPrompt"></textarea></div>
+            <div class="action-row"><button id="generateButton" class="primary big">✦ Генерировать</button><button id="queueButton" class="secondary big">Добавить в очередь</button><button id="stopButton" class="danger icon-button" title="Остановить">■</button></div>
+          </div>
+          <div class="right-stack">
+            <div class="panel preview-panel"><div class="panel-head"><h2>Результат</h2><span id="jobBadge" class="badge">Ожидание</span></div><div id="preview" class="preview"><div class="preview-empty"><span>✦</span><b>Здесь появится результат</b><small>Финальный файл загружается напрямую из ComfyUI через защищённый backend.</small></div></div><div class="progress-wrap"><div><span id="progressText">Нет активного задания</span><span id="progressPercent">0%</span></div><progress id="progressBar" max="1" value="0"></progress><small id="currentNode">Текущая нода: —</small></div></div>
+            <div class="panel queue-panel"><div class="panel-head"><h2>Очередь и история</h2><button id="refreshJobs" class="text-button">Обновить</button></div><div id="jobList" class="job-list"></div></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-workflow" class="page">
+        <div class="graph-toolbar"><button id="graphSave" class="primary">Сохранить граф</button><button id="graphUndo">↶ Отмена</button><button id="graphRedo">↷ Повтор</button><button id="graphDuplicate">Дублировать</button><button id="graphDelete">Удалить</button><button id="graphBypass">Bypass</button><button id="graphMute">Mute</button><span></span><button id="zoomOut">−</button><b id="zoomValue">100%</b><button id="zoomIn">+</button><button id="graphFit">Вписать</button></div>
+        <div id="graphViewport" class="graph-viewport"><svg id="graphLinks"></svg><div id="graphCanvas"></div><div id="graphHint">Выход → вход создаёт соединение. Перетаскивайте ноды; колесо меняет масштаб.</div></div>
+      </section>
+
+      <section id="page-references" class="page"><div class="panel"><div class="panel-head"><div><h2>Референсы</h2><p>Файлы с телефона загружаются на ПК; это не проводник Windows.</p></div><label class="primary file-button">Загрузить<input id="referenceFiles" type="file" accept="image/*,video/*,audio/*" multiple hidden></label></div><div id="dropZone" class="drop-zone">Перетащите изображения, видео или аудио</div><div id="referenceGrid" class="media-grid"></div></div></section>
+
+      <section id="page-gallery" class="page"><div class="panel"><div class="panel-head"><div><h2>Галерея результатов</h2><p>История хранится на сервере и не зависит от открытой страницы.</p></div><button id="galleryRefresh">Обновить</button></div><div id="galleryGrid" class="media-grid"></div></div></section>
+
+      <section id="page-assistant" class="page"><div class="assistant-layout"><div id="chatMessages" class="chat-messages"><div class="message assistant">Я работаю через выбранного провайдера. Граф, изображения и логи отправляются только после вашего явного действия.</div><div id="graphProposal" class="enhanced-box hidden"></div></div><form id="chatForm" class="chat-form"><textarea id="chatInput" placeholder="Улучшить промт, объяснить workflow или найти ошибку…" required></textarea><div><label><input id="chatVision" type="checkbox"> приложить выбранные референсы</label> · <label><input id="chatGraph" type="checkbox"> подготовить изменения текущего графа</label></div><button class="primary" type="submit">Отправить</button></form></div></section>
+
+      <section id="page-models" class="page"><div class="split"><div class="panel"><div class="panel-head"><h2>Модели движка</h2><button id="scanModels">Сканировать</button></div><div class="filter-row"><select id="modelCategory"><option>checkpoints</option><option>diffusion_models</option><option>text_encoders</option><option>clip</option><option>vae</option><option>loras</option><option>controlnet</option><option>upscale_models</option></select><input id="modelSearch" placeholder="Поиск"></div><div id="modelList" class="list"></div></div><div class="panel"><h2>Папки на Windows-ПК</h2><p>Доступ ограничен корнями, указанными в настройках.</p><div id="fileBrowser" class="list"></div></div></div></section>
+
+      <section id="page-nodes" class="page"><div class="panel"><div class="panel-head"><div><h2>Установленные ноды</h2><p>Список получен из `/object_info` подключённого ComfyUI.</p></div><input id="nodeSearch" placeholder="Найти ноду"></div><div id="nodeList" class="node-grid"></div></div></section>
+
+      <section id="page-optimization" class="page"><div class="panel"><h2>Профиль GPU</h2><p>Флаги применяются только к управляемому движку после перезапуска.</p><div class="profile-grid"><button data-profile="memory"><b>Экономия памяти</b><span>`--lowvram`, медленнее, меньше VRAM</span></button><button data-profile="balanced"><b>Баланс</b><span>Стандартные параметры ComfyUI</span></button><button data-profile="speed"><b>Скорость</b><span>`--highvram`, больше расход VRAM</span></button></div><div class="action-row"><button id="freeMemory" class="danger">Выгрузить модели ComfyUI</button><small>Не завершает чужие процессы и не обещает освободить VRAM всей системы.</small></div></div></section>
+
+      <section id="page-settings" class="page"><form id="settingsForm" class="settings-grid">
+        <div class="panel"><h2>ComfyUI</h2><label class="field"><span>Режим</span><select id="engineMode"><option value="external">Внешний движок</option><option value="managed">Встроенный управляемый</option></select></label><label class="field"><span>Адрес внешнего движка</span><input id="externalUrl" placeholder="http://127.0.0.1:8188"></label><label class="field"><span>Папка управляемого ComfyUI</span><input id="managedDirectory"></label><label class="field"><span>Python.exe</span><input id="pythonExecutable"></label><label class="field"><span>Порт ComfyUI</span><input id="managedPort" type="number"></label><label class="tiny-check"><input id="autoStart" type="checkbox"> запускать управляемый движок вместе с AI Studio</label><div class="action-row"><button id="engineStart" type="button">Запустить</button><button id="engineStop" type="button">Остановить</button></div></div>
+        <div class="panel"><h2>ИИ-провайдер</h2><label class="field"><span>Провайдер</span><select id="aiProvider"><option value="ollama">Ollama</option><option value="lmstudio">LM Studio</option><option value="openai">OpenAI API</option><option value="compatible">OpenAI-compatible</option></select></label><label class="field"><span>Endpoint</span><input id="aiEndpoint"></label><label class="field"><span>Модель</span><input id="aiModel"></label><label class="field"><span>Vision-модель</span><input id="visionModel"></label><label class="field"><span>API-ключ</span><input id="apiKey" type="password" placeholder="Оставьте пустым, чтобы не менять"></label><p class="notice">Подписка ChatGPT и оплата OpenAI API — разные продукты. AI Studio использует только официальный API, не cookies и не сессию сайта.</p><button id="testProvider" type="button">Проверить подключение</button></div>
+        <div class="panel"><h2>Сервер и данные</h2><label class="field"><span>Порт AI Studio</span><input id="studioPort" type="number"></label><label class="tiny-check"><input id="allowLan" type="checkbox"> разрешить подключения из локальной сети после перезапуска</label><label class="field"><span>Корни моделей (по одному в строке)</span><textarea id="modelRoots"></textarea></label><p class="notice">Для доступа через интернет используйте Tailscale/защищённый туннель и HTTPS. Не публикуйте порт ComfyUI.</p></div>
+        <div class="save-bar"><span id="settingsMessage"></span><button class="primary" type="submit">Сохранить настройки</button></div>
+      </form></section>
+    </main>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+**/publish/
+**/artifacts/
+.vs/
+.idea/
+*.user
+*.suo
+__pycache__/
+*.pyc
+
